@@ -1,0 +1,8 @@
+const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+export function exampleCards(examples) {
+  if(!examples?.length)return '';
+  return `<div class="evidence-cards">${examples.map(x=>`<figure class="evidence-card"><span class="evidence-kind">${x.kind==='quote'?(x.excerpt?'Excerpt from the group’s words':'From the group’s words'):'Summary of the group’s idea'}</span><blockquote>${x.kind==='quote'?'“':''}${escape(x.text)}${x.kind==='quote'?'”':''}</blockquote><figcaption><strong>${escape(x.group||'Group')}</strong>${x.contributor?`<span> · ${escape(x.contributor)}</span>`:''}<small>Slide ${Number(x.slide_number)||1}${x.contributor?' · contributor label':''}</small></figcaption></figure>`).join('')}</div>`;
+}
+export function renderDebriefSlide(slide,{index,total,title,evidenceAt}={}) {
+  return `<article class="projection-slide" aria-label="Debrief slide ${index+1}"><header class="projection-header"><span>CLASS DEBRIEF</span><span>${escape(String(index+1).padStart(2,'0'))} / ${escape(String(total).padStart(2,'0'))}</span></header><h1>${escape(slide.title)}</h1><p class="projection-takeaway">${escape(slide.takeaway)}</p><div class="projection-body ${slide.examples?.length?'':'no-examples'}"><ul>${slide.bullets.map(b=>`<li>${escape(b)}</li>`).join('')}</ul>${exampleCards(slide.examples||[])}</div><div class="projection-question"><span>LET’S DISCUSS</span><p>${escape(slide.question)}</p></div><footer class="projection-footer"><span>${escape(title||'Class discussion')}</span><span>${evidenceAt?'Group work as of '+escape(new Date(evidenceAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})):''}</span></footer></article>`;
+}

@@ -25,5 +25,14 @@ test('instructor interface: navigate slides, edit text, format, duplicate, and k
   await click('[data-action="present"]');assert(document.querySelector('.present-view'));
   assert(!document.querySelector('.present-view').textContent.includes('Your facilitation notes'));
   await click('[data-action="close-present"]');assert(!document.querySelector('.present-view'));
+  assert(document.querySelector('#right').textContent.includes('every 1 min'));
+  assert(document.querySelector('[data-field="contributor"]'));
+  await click('[data-action="project-debrief"]');
+  assert(document.querySelector('.projection-view'));
+  assert(document.querySelector('.projection-slide').textContent.includes('Group 2'));
+  assert(!document.querySelector('.projection-slide').textContent.includes('Ask groups to use a specific exchange'));
+  const firstTitle=document.querySelector('.projection-slide h1').textContent;
+  await click('[data-action="projection-next"]');assert.notEqual(document.querySelector('.projection-slide h1').textContent,firstTitle);
+  await click('[data-action="projection-close"]');assert(!document.querySelector('.projection-view'));assert.equal(document.querySelector('#app').inert,false);
   await click('[data-action="delete-slide"]');assert.equal(document.querySelectorAll('.thumb').length,4);
 });
