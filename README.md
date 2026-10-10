@@ -74,7 +74,13 @@ To replace an OpenAI key, update the existing `OPENAI_API_KEY` entry in this pro
 - Live API checks: two independent group editors, unauthorized and cross-group access rejection, stale revision conflicts, activity start/end restrictions, revoked group links, history, and unchanged-input skipping.
 - A real OpenAI request produced a saved structured debrief with valid source-slide references; student retrieval still omitted that debrief.
 - Supabase security advisor: no error/warning findings; five informational RLS-without-policy notices are intentional for server-only tables. Direct browser access is denied through both privileges and RLS.
-- The server schedule and GitHub Pages deployment are verified separately in the final delivery record below.
+- The actual two-minute cron schedule generated a debrief without a browser or manual trigger. Its disposable activity was removed after verification.
+- GitHub Actions [deployment 38061905731](https://github.com/kamg89/quick-webapp/actions/runs/38061905731) passed all seven unit/DOM tests, built the static app, and published successfully. HTTP checks verified the deployed HTML, JavaScript, CSS, configuration, and icon against their source bytes.
+- A blank four-group, four-debrief-slide activity is ready in draft state. No AI calls run until a live activity or manual update requests them. Other Supabase projects retained their prior active/inactive states.
 - **Visual verification limit:** no browser was connected to this session. DOM, build, live API, and deployment checks do not establish pixel-perfect appearance or full interactive browser compatibility. Check the page on the classroom display before class.
 
 Keep `.private/` local. Live verification scripts create disposable activities and use the private access file; they are not run in public CI. The original workshop notes and the separate Bachelor's Essay materials remain unchanged.
+
+### Delivery decision
+
+Use GitHub Pages for the interface and a dedicated Free-plan Supabase project for data, private AI execution, and scheduling. This removes the slide-download/upload step while keeping the instructor's synthesis separate from student editing. Capability links keep classroom entry simple; revision checks preserve conflicting drafts. For a future campus-wide deployment, replace the single instructor capability with institutional sign-in and add organization-level membership and retention controls.
