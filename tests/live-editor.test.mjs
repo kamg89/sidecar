@@ -1,0 +1,25 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {parseHTML} from 'linkedom';
+const settle=async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));};
+const saveDelay=()=>new Promise(r=>setTimeout(r,750));
+test('focused stale edits conflict visibly, and pause preserves drafts until reopening',async()=>{
+ const {window,document}=parseHTML('<html><body><div id="app"></div><div id="toast"></div><div id="modal-root"></div></body></html>');
+ let active=null;Object.defineProperty(document,'activeElement',{get:()=>active});window.HTMLElement.prototype.focus=function(){active=this;};
+ const storage={getItem:()=>null,setItem(){},removeItem(){}};
+ const data={session:{id:'session1',title:'Classroom test',instructions:'Explain your reasoning using a sports example.',status:'live',ends_at:new Date(Date.now()+600000).toISOString()},groups:[{id:'g1',name:'Group 1'}],slides:[{id:'s1',group_id:'g1',title:'Reflection',revision:0,theme:'paper'}],blocks:[{id:'b1',slide_id:'s1',label:'Our thinking',content:'',contributor:'',style:{},revision:0}]};
+ const writes=[];
+ Object.assign(globalThis,{document,window,sessionStorage:storage,localStorage:storage,location:{hash:'#group='+'a'.repeat(64),origin:'http://127.0.0.1:4173',pathname:'/'},history:{replaceState(){}},addEventListener(){},fetch:async(url,opts)=>{const p=JSON.parse(opts.body);let status=200,result;if(p.action==='get')result=structuredClone(data);else if(p.action==='save_block'){writes.push(p);if(p.revision!==data.blocks[0].revision){status=409;result={error:'Another editor saved this box.'};}else if(data.session.status!=='live'){status=403;result={error:'Group editing is paused.'};}else{Object.assign(data.blocks[0],p,{revision:data.blocks[0].revision+1});result={block:structuredClone(data.blocks[0])};}}else throw new Error(p.action);return {ok:status===200,status,json:async()=>result};}});
+ const timers=[],originalInterval=setInterval;globalThis.setInterval=fn=>{timers.push(fn);return 0;};await import('../public/app.js?live-editor-regression');globalThis.setInterval=originalInterval;await settle();
+ assert(document.querySelector('.student-task').textContent.includes('Explain your reasoning'));
+ const content=()=>document.querySelector('[data-field="content"]');
+ const input=value=>{active=content();active.textContent=value;active.dispatchEvent(new window.Event('input',{bubbles:true}));};
+ const click=async selector=>{const node=document.querySelector(selector);assert(node,selector);node.dispatchEvent(new window.Event('click',{bubbles:true}));await settle();};
+ input('My first explanation');await saveDelay();assert.equal(data.blocks[0].revision,1);
+ data.blocks[0].content='A teammate added a different explanation';data.blocks[0].revision=2;timers[0]();await settle();
+ assert.equal(content().textContent,'My first explanation');assert.equal(document.querySelector('[data-block]').dataset.revision,'1');
+ input('My expanded explanation');await saveDelay();assert.equal(writes.at(-1).revision,1);assert.equal(data.blocks[0].content,'A teammate added a different explanation');assert(document.querySelector('#conflict-alert'));assert.equal(content().textContent,'My expanded explanation');
+ await click('[data-action="resolve-conflict"]');assert(document.querySelector('.modal').textContent.includes('A teammate added'));document.querySelector('#merged-draft').value='Both explanations, with evidence.';await click('[data-action="keep-draft"]');assert.equal(data.blocks[0].content,'Both explanations, with evidence.');assert.equal(document.querySelector('#conflict-alert'),null);
+ input('A draft written just as the class pauses');data.session.status='paused';timers[0]();await settle();await saveDelay();assert.equal(content().getAttribute('contenteditable'),'false');assert.equal(content().textContent,'A draft written just as the class pauses');assert(document.querySelector('#student-state').textContent.includes('Draft kept'));assert.equal(data.blocks[0].content,'Both explanations, with evidence.');
+ data.session.status='live';timers[0]();await settle();assert.equal(data.blocks[0].content,'A draft written just as the class pauses');assert.equal(content().getAttribute('contenteditable'),'true');assert(document.querySelector('#editor-status').textContent.includes('All changes saved'));
+});

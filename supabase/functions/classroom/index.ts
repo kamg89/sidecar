@@ -65,7 +65,7 @@ async function generate(sessionId, force = false) {
   const input = data.slides.map(slide => ({slide_id:slide.id,workspace_id:slide.group_id,slide_number:data.slides.filter(x=>x.group_id===slide.group_id).findIndex(x=>x.id===slide.id)+1,group:s.work_mode==='individual'?'Individual '+((data.groups.find(g=>g.id===slide.group_id)?.position||0)+1):data.groups.find(g=>g.id===slide.group_id)?.name,title:slide.title,blocks:data.blocks.filter(b=>b.slide_id===slide.id).map(b=>({block_id:b.id,label:b.label,text:b.content,contributor:b.contributor||''}))}));
   const populated = input.filter(s=>s.blocks.some(b=>b.text.trim()));
   if (!populated.length) return {skipped:'Waiting for groups to write their first ideas.'};
-  const inputHash = await hash(JSON.stringify({version:3,model:env('OPENAI_MODEL'),input,prompt:s.debrief_prompt,focus:s.focus,count:s.slide_count}));
+  const inputHash = await hash(JSON.stringify({version:4,model:env('OPENAI_MODEL'),input,prompt:s.debrief_prompt,focus:s.focus,count:s.slide_count}));
   if (!force && inputHash === s.input_hash) return {skipped:'No new group work since the last debrief.'};
   if (JSON.stringify(input).length > 140000) throw new HttpError(413, 'There is too much text for one debrief. Use shorter group slides.');
   const now = new Date().toISOString();
