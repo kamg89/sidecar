@@ -1,6 +1,7 @@
 import { HttpError, text, uuid, integer, hash, token, safeEqual, style, publicSession } from './core.js';
 import { schemaForCount, debriefPrompt, enrichDebrief, prepareEvidence, restoreEvidence } from './debrief.js';
 import { classCode, withNewClassCode, newInstructorCode, instructorCode, assertTestWorkspaceScope, modelId, apiKey, candidateModels, validateAIConnection, activityModel, responseBudget } from './access.js';
+import { readAudio, transcribeAudio } from './transcription.js';
 import { templateInput, generateTemplate, validateTemplate, templateRows } from './template.js';
 
 let privateConfig = {};
@@ -112,9 +113,14 @@ Deno.serve(async req => {
     if (origin && !origins.includes(origin)) throw new HttpError(403, 'This origin is not allowed.');
     if (req.method !== 'POST') throw new HttpError(405, 'Use POST.');
     await loadConfig();
-    const raw = await req.text();
-    if (raw.length > 45000) throw new HttpError(413, 'Request too large.');
-    let body; try { body = JSON.parse(raw); } catch { throw new HttpError(400, 'Invalid request.'); }
+    const audioRequest=new URL(req.url).searchParams.get('action')==='transcribe_description';
+    let body;
+    if(audioRequest)body={action:'transcribe_description'};
+    else {
+      const raw=await req.text();
+      if(raw.length>45000)throw new HttpError(413,'Request too large.');
+      try{body=JSON.parse(raw);}catch{throw new HttpError(400,'Invalid request.');}
+    }
     const key = req.headers.get('x-classroom-key') || '';
     if (key.length > 256) throw new HttpError(401, 'Invalid access key.');
     if (body.action === 'tick') {
@@ -165,7 +171,7 @@ Deno.serve(async req => {
     }
     const instructor = master || sandbox || Boolean(tester);
     if(['tester_access','test_workspace_access','admin_status','admin_models','admin_save'].includes(body.action)&&!master)throw new HttpError(tester||sandbox?403:401,'This action requires the classroom owner.');
-    if(['list','create','generate_template','activity_models','delete_session'].includes(body.action)&&!master&&!sandbox)throw new HttpError(tester?403:401,'This action requires instructor workspace access.');
+    if(['list','create','generate_template','activity_models','transcribe_description','delete_session'].includes(body.action)&&!master&&!sandbox)throw new HttpError(tester?403:401,'This action requires instructor workspace access.');
     if(sandbox)await assertTestWorkspaceScope(body,one);
     if(body.action==='test_workspace_access'){const code=body.revoke?'':newInstructorCode(),expires=body.revoke?'':new Date(Date.now()+7*86400000).toISOString();await db('rpc/classroom_save_test_access','','POST',{p_code_hash:code?await hash(code):'',p_token:code?'w_'+token():'',p_expires:expires});await loadConfig(true);return reply(code?{code,expires_at:expires}:{revoked:true});}
     if(body.action==='admin_status'){await loadConfig(true);return reply({configured:Boolean(env('OPENAI_API_KEY')),model:env('OPENAI_MODEL')||'gpt-4.1-mini'});}
@@ -195,6 +201,13 @@ Deno.serve(async req => {
       if(!result.ok)throw new HttpError(502,'Could not load the available models. Retry, or use the workspace default.');
       const data=await result.json();
       return reply({models:candidateModels(data.data.map(m=>m.id)).filter(id=>!/-pro(?:-|$)/.test(id)),defaultModel:env('OPENAI_MODEL')||'gpt-4.1-mini'});
+    }
+    if(body.action==='transcribe_description') {
+      if(!audioRequest)throw new HttpError(400,'Send a microphone recording.');
+      const file=await readAudio(req);
+      if(!await db('rpc/classroom_instructor_login_limit','','POST',{p_bucket:await hash('transcription:'+key+':'+Math.floor(Date.now()/3600000))}))throw new HttpError(429,'This workspace has used its 12 voice-input attempts for this hour. You can still type your description.');
+      await loadConfig(true);
+      return reply(await transcribeAudio(file,env('OPENAI_API_KEY')));
     }
     if (body.action === 'generate_template') {
       const input=templateInput(body);
