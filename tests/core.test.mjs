@@ -12,7 +12,7 @@ test('formatting accepts only constrained properties',()=>{
 });
 test('student projection does not contain debrief or private instructions',()=>{
   const s=publicSession({id:'1',title:'A',instructions:'Task',status:'live',ends_at:null,created_at:'now',debrief:'private',debrief_prompt:'private',input_hash:'private',ai_error:'private'});
-  assert.deepEqual(Object.keys(s),['id','title','instructions','status','ends_at','created_at']);assert(!JSON.stringify(s).includes('private'));
+  assert.deepEqual(Object.keys(s),['id','work_mode','title','instructions','status','ends_at','created_at']);assert(!JSON.stringify(s).includes('private'));
 });
 test('AI citations must name real slides',()=>{
   const result=validateDebrief({slides:[{title:'A',takeaway:'B',question:'C',notes:'D',bullets:['E'],sources:['valid','invented']}]},new Set(['valid']));assert.deepEqual(result.slides[0].sources,['valid']);assert.throws(()=>validateDebrief({slides:[]},new Set()));

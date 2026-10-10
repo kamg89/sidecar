@@ -33,7 +33,7 @@ export function style(input = {}) {
   return result;
 }
 export function publicSession(s) {
-  return {id:s.id,title:s.title,instructions:s.instructions,status:s.status,ends_at:s.ends_at,created_at:s.created_at};
+  return {id:s.id,work_mode:s.work_mode,title:s.title,instructions:s.instructions,status:s.status,ends_at:s.ends_at,created_at:s.created_at};
 }
 export function validateDebrief(data, validSlides) {
   if (!data || !Array.isArray(data.slides) || !data.slides.length || data.slides.length > 6) throw new HttpError(502, 'The AI returned an invalid debrief. Try again.');

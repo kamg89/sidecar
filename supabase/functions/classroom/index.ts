@@ -1,5 +1,6 @@
 import { HttpError, text, uuid, integer, hash, token, safeEqual, style, publicSession } from './core.js';
 import { schemaForCount, debriefPrompt, enrichDebrief } from './debrief.js';
+import { classCode, newClassCode, modelId, apiKey, candidateModels, validateAIConnection } from './access.js';
 
 let privateConfig = {};
 let configReadAt = 0;
@@ -16,8 +17,8 @@ async function db(table, query = '', method = 'GET', body = undefined) {
   if (!response.ok) { console.error('Database operation failed', table, response.status); throw new HttpError(500, 'Could not save to the database. Please retry.'); }
   return response.status === 204 ? [] : response.json();
 }
-async function loadConfig() {
-  if (Date.now()-configReadAt < 60000) return;
+async function loadConfig(force=false) {
+  if (!force && Date.now()-configReadAt < 60000) return;
   privateConfig = await db('rpc/classroom_server_config','','POST',{});
   configReadAt = Date.now();
 }
@@ -28,7 +29,7 @@ async function sessionData(id, group = null) {
   const slides = await db('class_slides', `session_id=eq.${id}${group ? '&group_id=eq.' + group.id : ''}&order=position,created_at`);
   const blocks = slides.length ? await db('slide_blocks', `slide_id=in.(${slides.map(s=>s.id).join(',')})&order=position,id`) : [];
   const {tester_key_hash, ...instructorSession} = session;
-  return {session:group ? publicSession(session) : instructorSession, groups:groups.map(({token_hash,...g})=>g), slides, blocks};
+  return {session:group ? publicSession(session) : instructorSession, groups:groups.map(({token_hash,claimant_hash,...g})=>({...g,claimed:Boolean(claimant_hash)})), slides, blocks};
 }
 async function groupFor(auth) {
   if (!/^[a-f0-9]{64}$/.test(auth)) throw new HttpError(401, 'Open the group link provided by your instructor.');
@@ -38,7 +39,7 @@ async function groupFor(auth) {
 }
 async function checkTesterScope(body, sessionId) {
   let target;
-  if(['get','settings','debrief','history'].includes(body.action)) target=body.sessionId||sessionId;
+  if(['get','settings','debrief','history','join_settings'].includes(body.action)) target=body.sessionId||sessionId;
   else if(['save_block','delete_block'].includes(body.action)) {const b=await one('slide_blocks',body.id); target=(await one('class_slides',b.slide_id)).session_id;}
   else if(['save_slide','delete_slide'].includes(body.action)) target=(await one('class_slides',body.id)).session_id;
   else if(body.action==='add_block') target=(await one('class_slides',body.slideId)).session_id;
@@ -57,13 +58,14 @@ async function authorizeSlide(id, group) {
 }
 
 async function generate(sessionId, force = false) {
+  await loadConfig(true);
   const data = await sessionData(sessionId);
   const s = data.session;
   if(s.is_test && (s.ai_runs >= 30 || !s.tester_expires_at || new Date(s.tester_expires_at) < new Date())) return {skipped:'This test activity has reached its AI limit or its invitation has expired.'};
-  const input = data.slides.map(slide => ({slide_id:slide.id,slide_number:data.slides.filter(x=>x.group_id===slide.group_id).findIndex(x=>x.id===slide.id)+1,group:data.groups.find(g=>g.id===slide.group_id)?.name,title:slide.title,blocks:data.blocks.filter(b=>b.slide_id===slide.id).map(b=>({block_id:b.id,label:b.label,text:b.content,contributor:b.contributor||''}))}));
+  const input = data.slides.map(slide => ({slide_id:slide.id,workspace_id:slide.group_id,slide_number:data.slides.filter(x=>x.group_id===slide.group_id).findIndex(x=>x.id===slide.id)+1,group:s.work_mode==='individual'?'Individual '+((data.groups.find(g=>g.id===slide.group_id)?.position||0)+1):data.groups.find(g=>g.id===slide.group_id)?.name,title:slide.title,blocks:data.blocks.filter(b=>b.slide_id===slide.id).map(b=>({block_id:b.id,label:b.label,text:b.content,contributor:b.contributor||''}))}));
   const populated = input.filter(s=>s.blocks.some(b=>b.text.trim()));
   if (!populated.length) return {skipped:'Waiting for groups to write their first ideas.'};
-  const inputHash = await hash(JSON.stringify({version:2,input,prompt:s.debrief_prompt,focus:s.focus,count:s.slide_count}));
+  const inputHash = await hash(JSON.stringify({version:3,model:env('OPENAI_MODEL'),input,prompt:s.debrief_prompt,focus:s.focus,count:s.slide_count}));
   if (!force && inputHash === s.input_hash) return {skipped:'No new group work since the last debrief.'};
   if (JSON.stringify(input).length > 140000) throw new HttpError(413, 'There is too much text for one debrief. Use shorter group slides.');
   const now = new Date().toISOString();
@@ -74,7 +76,7 @@ async function generate(sessionId, force = false) {
     if (!env('OPENAI_API_KEY')) throw new HttpError(503, 'The OpenAI key has not been configured on the server.');
     const result = await fetch('https://api.openai.com/v1/responses', {
       method:'POST', signal:AbortSignal.timeout(55000), headers:{Authorization:`Bearer ${env('OPENAI_API_KEY')}`, 'Content-Type':'application/json'},
-      body:JSON.stringify({model:env('OPENAI_MODEL') || 'gpt-4.1-mini',store:false,max_output_tokens:3500,
+      body:JSON.stringify({model:env('OPENAI_MODEL') || 'gpt-4.1-mini',store:false,max_output_tokens:1000+s.slide_count*850,
         instructions:debriefPrompt(s),
         input:JSON.stringify({activity:s.title,instructions:s.instructions,group_work:input}),text:{format:{type:'json_schema',name:'classroom_debrief',strict:true,schema:schemaForCount(s.slide_count)}}})
     });
@@ -87,7 +89,7 @@ async function generate(sessionId, force = false) {
     const raw = response.output.flatMap(x=>x.content || []).filter(x=>x.type==='output_text').map(x=>x.text).join('');
     const content = enrichDebrief(JSON.parse(raw),input);
     if (content.slides.length !== s.slide_count) throw new HttpError(502, 'The AI returned the wrong slide count. Please retry.');
-    content.evidence_at = now; content.groups_with_content = new Set(populated.map(x=>x.group)).size; content.total_slides = input.length;
+    content.evidence_at = now; content.groups_with_content = new Set(populated.map(x=>x.workspace_id)).size; content.total_slides = input.length; content.total_workspaces=data.groups.length; content.model=env('OPENAI_MODEL')||'gpt-4.1-mini';
     await db('debrief_history','', 'POST', {session_id:sessionId,content,input_hash:inputHash});
     await db('class_sessions', `id=eq.${sessionId}`, 'PATCH', {debrief:content,debrief_at:new Date().toISOString(),debrief_lock_until:null,input_hash:inputHash,ai_error:null});
     return {generated:true};
@@ -121,6 +123,25 @@ Deno.serve(async req => {
       for (const s of sessions) { try { const result=await generate(s.id); results.push(result); if(result.skipped) await db('class_sessions',`id=eq.${s.id}`,'PATCH',{last_attempt_at:now}); } catch(e) {results.push({error:e.message});} }
       return reply({checked:sessions.length,results});
     }
+    if(['lookup_class','join_class'].includes(body.action)) {
+      const ip=req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()||'unknown';
+      const allowed=await db('rpc/classroom_join_limit','','POST',{p_bucket:await hash(ip+':'+Math.floor(Date.now()/60000))});
+      if(!allowed)throw new HttpError(429,'Too many join attempts. Please wait one minute and retry.');
+      const code=classCode(body.code);
+      const activity=(await db('class_sessions','class_code=eq.'+code))[0];
+      if(!activity||!activity.join_enabled||activity.status==='ended'||activity.is_test&&(!activity.tester_expires_at||new Date(activity.tester_expires_at)<new Date()))throw new HttpError(404,'This class code is unavailable. Check the code with your instructor.');
+      const groups=await db('class_groups',`session_id=eq.${activity.id}&order=position`);
+      if(body.action==='lookup_class')return reply({title:activity.title,mode:activity.work_mode,status:activity.status,groups:activity.work_mode==='group'?groups.map(g=>({id:g.id,name:g.name})):[],capacity:groups.length});
+      if(activity.work_mode==='individual'){
+        const name=text(body.name,60).trim();if(!name)throw new HttpError(400,'Enter the name you want displayed with your work.');
+        if(!/^[a-f0-9]{64}$/.test(body.resumeToken||''))throw new HttpError(400,'Your browser could not create a return code. Please reload.');
+        const seat=await db('rpc/classroom_claim_individual','','POST',{p_session:activity.id,p_resume_hash:await hash(body.resumeToken),p_name:name});
+        if(!seat)throw new HttpError(409,'All individual places are taken, or joining has closed. Ask your instructor for your return link.');
+        return reply(seat);
+      }
+      const group=groups.find(g=>g.id===uuid(body.groupId));if(!group)throw new HttpError(403,'Choose a group in this class.');
+      return reply({token:group.join_token,groupId:group.id});
+    }
     const master = Boolean(env('INSTRUCTOR_KEY_SHA256')) && safeEqual(await hash(key), env('INSTRUCTOR_KEY_SHA256'));
     let tester = null;
     if(!master && /^t_[a-f0-9]{64}$/.test(key)) {
@@ -128,18 +149,34 @@ Deno.serve(async req => {
       if(!tester?.is_test || !tester.tester_expires_at || new Date(tester.tester_expires_at)<new Date()) throw new HttpError(401,'This test invitation has expired or been revoked.');
     }
     const instructor = master || Boolean(tester);
-    if(['list','create','tester_access','delete_session'].includes(body.action) && !master) throw new HttpError(tester ? 403 : 401,'This action requires the classroom owner.');
+    if(['list','create','tester_access','delete_session','admin_status','admin_models','admin_save'].includes(body.action) && !master) throw new HttpError(tester ? 403 : 401,'This action requires the classroom owner.');
+    if(body.action==='admin_status'){await loadConfig(true);return reply({configured:Boolean(env('OPENAI_API_KEY')),model:env('OPENAI_MODEL')||'gpt-4.1-mini'});}
+    if(body.action==='admin_models'){
+      await loadConfig(true);const candidate=body.apiKey?apiKey(body.apiKey):env('OPENAI_API_KEY');
+      if(!candidate)throw new HttpError(400,'Add an OpenAI API key first.');
+      const result=await fetch('https://api.openai.com/v1/models',{headers:{Authorization:'Bearer '+candidate},signal:AbortSignal.timeout(15000)});
+      if(!result.ok)throw new HttpError(400,'Could not load models for this key. Check the key and its permissions. Saved settings are unchanged.');
+      const data=await result.json();return reply({models:candidateModels(data.data.map(m=>m.id))});
+    }
+    if(body.action==='admin_save'){
+      await loadConfig(true);const model=modelId(body.model),replacement=body.apiKey?apiKey(body.apiKey):null;
+      const candidate=replacement||env('OPENAI_API_KEY');if(!candidate)throw new HttpError(400,'Add an OpenAI API key first.');
+      await validateAIConnection(candidate,model);
+      await db('rpc/classroom_save_ai_config','','POST',{p_model:model,p_api_key:replacement});
+      await loadConfig(true);return reply({saved:true,configured:true,model});
+    }
     if(tester) await checkTesterScope(body,tester.id);
-    const instructorActions = new Set(['list','create','settings','debrief','history','rotate_group','tester_access','delete_session']);
+    const instructorActions = new Set(['list','create','settings','debrief','history','rotate_group','tester_access','delete_session','join_settings']);
     if (instructorActions.has(body.action) && !instructor) throw new HttpError(401,'Enter your instructor access key.');
     const group = instructor ? null : await groupFor(key);
     if (body.action === 'list') return reply({sessions:await db('class_sessions','select=id,title,status,created_at,ends_at&order=created_at.desc&limit=60')});
     if (body.action === 'create') {
-      const count = integer(body.groups,1,20);
+      const mode=body.workMode==='individual'?'individual':'group';
+      const count = integer(body.groups,1,mode==='individual'?60:20);
       const sessionId = crypto.randomUUID();
-      await db('class_sessions','', 'POST', {id:sessionId,is_test:Boolean(body.testMode),title:text(body.title,160).trim() || 'Untitled activity',instructions:text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)});
+      await db('class_sessions','', 'POST', {id:sessionId,work_mode:mode,class_code:newClassCode(),is_test:Boolean(body.testMode),title:text(body.title,160).trim() || 'Untitled activity',instructions:text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)});
       try {
-        const groups = await Promise.all(Array.from({length:count},async(_,i)=>{const join = token();return {id:crypto.randomUUID(),session_id:sessionId,name:`Group ${i+1}`,join_token:join,token_hash:await hash(join),position:i};}));
+        const groups = await Promise.all(Array.from({length:count},async(_,i)=>{const join = token();return {id:crypto.randomUUID(),session_id:sessionId,name:`${mode==='individual'?'Learner':'Group'} ${i+1}`,join_token:join,token_hash:await hash(join),position:i};}));
         await db('class_groups','', 'POST',groups);
         const slides = groups.map(g=>({id:crypto.randomUUID(),session_id:sessionId,group_id:g.id,title:g.name+' · Our reflection'}));
         await db('class_slides','', 'POST',slides);
@@ -156,6 +193,10 @@ Deno.serve(async req => {
       const expires=new Date(Date.now()+7*86400000).toISOString();
       await db('class_sessions',`id=eq.${session.id}`,'PATCH',{tester_key_hash:body.revoke?null:await hash(invite),tester_expires_at:body.revoke?null:expires});
       return reply(body.revoke?{revoked:true}:{token:invite,expires_at:expires});
+    }
+    if(body.action==='join_settings'){
+      const patch={};if('enabled' in body)patch.join_enabled=Boolean(body.enabled);if(body.rotate)patch.class_code=newClassCode();
+      await db('class_sessions',`id=eq.${uuid(body.sessionId)}`,'PATCH',patch);return reply({saved:true});
     }
     if (body.action === 'settings') {
       const patch = {};
