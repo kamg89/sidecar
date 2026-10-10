@@ -5,11 +5,12 @@ import { makeDemo } from '../public/demo.js';
 import { publicSession } from '../supabase/functions/classroom/core.js';
 test('student workspace renders only group editing and never instructor controls',async()=>{
   const {window,document}=parseHTML('<html><body><div id="app"></div><div id="toast"></div><div id="modal-root"></div></body></html>');
-  const fixture=makeDemo();fixture.groups=fixture.groups.slice(0,1);fixture.slides=fixture.slides.slice(0,1);fixture.blocks=fixture.blocks.filter(b=>b.slide_id===fixture.slides[0].id);fixture.session=publicSession(fixture.session);
+  const fixture=makeDemo();fixture.groups=fixture.groups.slice(0,1);fixture.slides=fixture.slides.slice(0,1);fixture.blocks=fixture.blocks.filter(b=>b.slide_id===fixture.slides[0].id);fixture.session=publicSession(fixture.session);fixture.session.instructions='First, read the scenario.\n'+('Discuss the benefits and costs with your group. '.repeat(6))+'\nFinally, add evidence and names. <strong>Text, not HTML.</strong>';
   Object.assign(globalThis,{document,window,sessionStorage:{getItem:()=>null},localStorage:{getItem:()=>null},location:{hash:'#group=test',origin:'http://127.0.0.1:4173',pathname:'/'},history:{replaceState(){}},addEventListener(){},fetch:async()=>({ok:true,json:async()=>fixture})});
-  const originalInterval=globalThis.setInterval;globalThis.setInterval=()=>0;
+  const timers=[],originalInterval=globalThis.setInterval;globalThis.setInterval=fn=>{timers.push(fn);return 0;};
   await import('../public/app.js?student-test');await new Promise(r=>setImmediate(r));globalThis.setInterval=originalInterval;
   assert.equal(document.querySelectorAll('.thumb').length,1);
+  const instructions=document.querySelector('.student-instructions');assert(instructions.hasAttribute('open'));assert.equal(document.querySelector('#student-instructions-text').textContent,fixture.session.instructions);assert.equal(document.querySelector('#student-instructions-text strong'),null,'Instructions must be escaped text');
   assert(document.querySelector('[contenteditable="true"]'));
   const originalResponse=document.querySelector('[contenteditable="true"]');
   assert(document.querySelector('#slide-tools').hasAttribute('hidden'));
@@ -17,6 +18,7 @@ test('student workspace renders only group editing and never instructor controls
   assert(!document.querySelector('#slide-tools').hasAttribute('hidden'));
   assert.equal(document.querySelector('[data-action="student-tools"]').getAttribute('aria-expanded'),'true');
   assert.equal(document.querySelector('[contenteditable="true"]'),originalResponse,'Opening tools must not replace a student’s active response');
+  instructions.removeAttribute('open');fixture.session.instructions+='\nAn instructor clarification.';timers[0]();await new Promise(r=>setImmediate(r));assert.equal(document.querySelector('#student-instructions-text').textContent,fixture.session.instructions);assert.equal(document.querySelector('.student-instructions'),instructions);assert(!instructions.hasAttribute('open'),'Polling keeps the student’s collapse choice');
   for(const selector of ['#right','[data-action="generate"]','[data-action="debrief-settings"]','[data-action="share"]','[data-action="timer"]','[data-action="export"]'])assert.equal(document.querySelector(selector),null,selector+' must not be available to students');
   assert(!document.body.textContent.includes('Your facilitation notes'));
 });
