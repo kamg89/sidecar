@@ -8,6 +8,7 @@ test('only workspace instructors can generate templates; throttling and preview 
   let handler,allow=true,aiCalls=0;const writes=[];
   globalThis.Deno={env:{get:name=>({SUPABASE_URL:'https://database.invalid',SUPABASE_SERVICE_ROLE_KEY:'test-service'})[name]},serve:fn=>handler=fn};
   globalThis.fetch=async(url,options={})=>{
+    if(url==='https://api.openai.com/v1/models')return Response.json({data:[{id:'gpt-5.6-luna'},{id:'gpt-5.6-terra'},{id:'gpt-5-pro'},{id:'gpt-realtime'}]});
     if(url==='https://api.openai.com/v1/responses'){aiCalls++;return Response.json({status:'completed',output:[{content:[{type:'output_text',text:JSON.stringify({title:'A project',instructions:'Compare your evidence.',debrief_prompt:'Use student work.',slides:[{title:'Our thinking',prompts:['What is your claim?','What is your evidence?']}]})}]}]});}
     if(url.includes('rpc/classroom_server_config'))return Response.json(secrets);
     if(url.includes('rpc/classroom_instructor_login_limit')){writes.push({url,body:JSON.parse(options.body)});return Response.json(allow);}
@@ -15,6 +16,9 @@ test('only workspace instructors can generate templates; throttling and preview 
     throw new Error('Unexpected database call: '+url);
   };
   await import('../supabase/functions/classroom/index.ts');
+  const catalog=key=>handler(new Request('https://function.invalid',{method:'POST',headers:{'Content-Type':'application/json','x-classroom-key':key},body:JSON.stringify({action:'activity_models'})}));
+  for(const key of ['', 'c'.repeat(64), tester])assert([401,403].includes((await catalog(key)).status));
+  for(const key of [owner,sandbox]){const response=await catalog(key);assert.equal(response.status,200);const data=await response.json();assert.deepEqual(data.models,['gpt-5.6-luna','gpt-5.6-terra']);assert(!JSON.stringify(data).includes('server-only'));}
   const call=key=>handler(new Request('https://function.invalid',{method:'POST',headers:{'Content-Type':'application/json','x-classroom-key':key},body:JSON.stringify({action:'generate_template',description:'Analyze the causes of a historical event with source evidence.'})}));
   for(const key of ['', 'c'.repeat(64), tester])assert([401,403].includes((await call(key)).status));
   assert.equal(aiCalls,0);

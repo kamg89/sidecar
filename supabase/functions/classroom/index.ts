@@ -1,6 +1,6 @@
 import { HttpError, text, uuid, integer, hash, token, safeEqual, style, publicSession } from './core.js';
 import { schemaForCount, debriefPrompt, enrichDebrief, prepareEvidence, restoreEvidence } from './debrief.js';
-import { classCode, withNewClassCode, newInstructorCode, instructorCode, assertTestWorkspaceScope, modelId, apiKey, candidateModels, validateAIConnection } from './access.js';
+import { classCode, withNewClassCode, newInstructorCode, instructorCode, assertTestWorkspaceScope, modelId, apiKey, candidateModels, validateAIConnection, activityModel, responseBudget } from './access.js';
 import { templateInput, generateTemplate, validateTemplate, templateRows } from './template.js';
 
 let privateConfig = {};
@@ -62,11 +62,12 @@ async function generate(sessionId, force = false) {
   await loadConfig(true);
   const data = await sessionData(sessionId);
   const s = data.session;
+  const model=s.ai_model||env('OPENAI_MODEL')||'gpt-4.1-mini';
   if(s.is_test && (s.ai_runs >= 30 || !s.tester_expires_at || new Date(s.tester_expires_at) < new Date())) return {skipped:'This test activity has reached its AI limit or its invitation has expired.'};
   const input = data.slides.map(slide => ({slide_id:slide.id,workspace_id:slide.group_id,slide_number:data.slides.filter(x=>x.group_id===slide.group_id).findIndex(x=>x.id===slide.id)+1,group:s.work_mode==='individual'?'Individual '+((data.groups.find(g=>g.id===slide.group_id)?.position||0)+1):data.groups.find(g=>g.id===slide.group_id)?.name,title:slide.title,blocks:data.blocks.filter(b=>b.slide_id===slide.id).map(b=>({block_id:b.id,label:b.label,text:b.content,contributor:b.contributor||''}))}));
   const populated = input.filter(s=>s.blocks.some(b=>b.text.trim()));
   if (!populated.length) return {skipped:'Waiting for groups to write their first ideas.'};
-  const inputHash = await hash(JSON.stringify({version:6,model:env('OPENAI_MODEL'),input,prompt:s.debrief_prompt,focus:s.focus,count:s.slide_count}));
+  const inputHash = await hash(JSON.stringify({version:7,model,input,prompt:s.debrief_prompt,focus:s.focus,count:s.slide_count}));
   if (!force && inputHash === s.input_hash) return {skipped:'No new group work since the last debrief.'};
   if (JSON.stringify(input).length > 140000) throw new HttpError(413, 'There is too much text for one debrief. Use shorter group slides.');
   const now = new Date().toISOString();
@@ -78,7 +79,7 @@ async function generate(sessionId, force = false) {
     const evidence=prepareEvidence(input);
     const result = await fetch('https://api.openai.com/v1/responses', {
       method:'POST', signal:AbortSignal.timeout(55000), headers:{Authorization:`Bearer ${env('OPENAI_API_KEY')}`, 'Content-Type':'application/json'},
-      body:JSON.stringify({model:env('OPENAI_MODEL') || 'gpt-4.1-mini',store:false,max_output_tokens:1000+s.slide_count*850,
+      body:JSON.stringify({model,store:false,...responseBudget(model,1000+s.slide_count*850),
         instructions:debriefPrompt(s),
         input:JSON.stringify({activity:s.title,instructions:s.instructions,group_work:evidence.input}),text:{format:{type:'json_schema',name:'classroom_debrief',strict:true,schema:schemaForCount(s.slide_count,evidence.input)}}})
     });
@@ -91,7 +92,7 @@ async function generate(sessionId, force = false) {
     const raw = response.output.flatMap(x=>x.content || []).filter(x=>x.type==='output_text').map(x=>x.text).join('');
     const content = enrichDebrief(restoreEvidence(JSON.parse(raw),evidence),input);
     if (content.slides.length !== s.slide_count) throw new HttpError(502, 'The AI returned the wrong slide count. Please retry.');
-    content.evidence_at = now; content.groups_with_content = new Set(populated.map(x=>x.workspace_id)).size; content.total_slides = input.length; content.total_workspaces=data.groups.length; content.model=env('OPENAI_MODEL')||'gpt-4.1-mini';
+    content.evidence_at = now; content.groups_with_content = new Set(populated.map(x=>x.workspace_id)).size; content.total_slides = input.length; content.total_workspaces=data.groups.length; content.model=model;
     await db('debrief_history','', 'POST', {session_id:sessionId,content,input_hash:inputHash});
     await db('class_sessions', `id=eq.${sessionId}`, 'PATCH', {debrief:content,debrief_at:new Date().toISOString(),debrief_lock_until:null,input_hash:inputHash,ai_error:null});
     return {generated:true};
@@ -164,7 +165,7 @@ Deno.serve(async req => {
     }
     const instructor = master || sandbox || Boolean(tester);
     if(['tester_access','test_workspace_access','admin_status','admin_models','admin_save'].includes(body.action)&&!master)throw new HttpError(tester||sandbox?403:401,'This action requires the classroom owner.');
-    if(['list','create','generate_template','delete_session'].includes(body.action)&&!master&&!sandbox)throw new HttpError(tester?403:401,'This action requires instructor workspace access.');
+    if(['list','create','generate_template','activity_models','delete_session'].includes(body.action)&&!master&&!sandbox)throw new HttpError(tester?403:401,'This action requires instructor workspace access.');
     if(sandbox)await assertTestWorkspaceScope(body,one);
     if(body.action==='test_workspace_access'){const code=body.revoke?'':newInstructorCode(),expires=body.revoke?'':new Date(Date.now()+7*86400000).toISOString();await db('rpc/classroom_save_test_access','','POST',{p_code_hash:code?await hash(code):'',p_token:code?'w_'+token():'',p_expires:expires});await loadConfig(true);return reply(code?{code,expires_at:expires}:{revoked:true});}
     if(body.action==='admin_status'){await loadConfig(true);return reply({configured:Boolean(env('OPENAI_API_KEY')),model:env('OPENAI_MODEL')||'gpt-4.1-mini'});}
@@ -186,22 +187,32 @@ Deno.serve(async req => {
     const instructorActions = new Set(['list','create','settings','debrief','history','rotate_group','tester_access','delete_session','join_settings']);
     if (instructorActions.has(body.action) && !instructor) throw new HttpError(401,'Enter your instructor access key.');
     const group = instructor ? null : await groupFor(key);
-    if (body.action === 'list') return reply({sessions:await db('class_sessions','select=id,title,status,created_at,ends_at&order=created_at.desc&limit=60'+(sandbox?'&is_test=eq.true':''))});
+    if (body.action === 'list') return reply({sessions:await db('class_sessions','select=id,title,status,created_at,ends_at,work_mode,ai_model&order=created_at.desc&limit=60'+(sandbox?'&is_test=eq.true':''))});
+    if (body.action === 'activity_models') {
+      await loadConfig(true);
+      if(!env('OPENAI_API_KEY'))throw new HttpError(503,'Ask the owner to connect an API key in AI settings.');
+      const result=await fetch('https://api.openai.com/v1/models',{headers:{Authorization:'Bearer '+env('OPENAI_API_KEY')},signal:AbortSignal.timeout(15000)});
+      if(!result.ok)throw new HttpError(502,'Could not load the available models. Retry, or use the workspace default.');
+      const data=await result.json();
+      return reply({models:candidateModels(data.data.map(m=>m.id)).filter(id=>!/-pro(?:-|$)/.test(id)),defaultModel:env('OPENAI_MODEL')||'gpt-4.1-mini'});
+    }
     if (body.action === 'generate_template') {
       const input=templateInput(body);
+      const model=activityModel(body.model,env('OPENAI_MODEL')||'gpt-4.1-mini');
       // An authenticated workspace gets a separate 12-attempt hourly bucket.
       // This fixed-purpose counter does not share the sign-in or student-join bucket.
       if(!await db('rpc/classroom_instructor_login_limit','','POST',{p_bucket:await hash('template:'+key+':'+Math.floor(Date.now()/3600000))}))throw new HttpError(429,'This workspace has used its 12 template attempts for this hour. You can still edit a generated preview or try again next hour.');
       await loadConfig(true);
-      return reply(await generateTemplate(input,env('OPENAI_API_KEY'),env('OPENAI_MODEL')||'gpt-4.1-mini'));
+      return reply(await generateTemplate(input,env('OPENAI_API_KEY'),model));
     }
     if (body.action === 'create') {
       if(sandbox&&(await db('class_sessions','is_test=eq.true&select=id')).length>=10)throw new HttpError(400,'The test workspace holds up to 10 activities. Delete an old test activity first.');
       const mode=body.workMode==='individual'?'individual':'group';
       const count = integer(body.groups,1,mode==='individual'?60:20);
       const template=body.template===undefined?null:validateTemplate(body.template);
+      const model=activityModel(body.model,env('OPENAI_MODEL')||'gpt-4.1-mini');
       const sessionId = crypto.randomUUID();
-      await withNewClassCode(code=>db('class_sessions','', 'POST', {id:sessionId,work_mode:mode,class_code:code,is_test:sandbox||Boolean(body.testMode),...(sandbox?{tester_expires_at:env('TEST_INSTRUCTOR_EXPIRES_AT')}:{}),title:template?.title||text(body.title,160).trim() || 'Untitled activity',instructions:template?.instructions??text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:template?.debrief_prompt??text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)}));
+      await withNewClassCode(code=>db('class_sessions','', 'POST', {id:sessionId,ai_model:model,work_mode:mode,class_code:code,is_test:sandbox||Boolean(body.testMode),...(sandbox?{tester_expires_at:env('TEST_INSTRUCTOR_EXPIRES_AT')}:{}),title:template?.title||text(body.title,160).trim() || 'Untitled activity',instructions:template?.instructions??text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:template?.debrief_prompt??text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)}));
       try {
         const groups = await Promise.all(Array.from({length:count},async(_,i)=>{const join = token();return {id:crypto.randomUUID(),session_id:sessionId,name:`${mode==='individual'?'Learner':'Group'} ${i+1}`,join_token:join,token_hash:await hash(join),position:i};}));
         await db('class_groups','', 'POST',groups);

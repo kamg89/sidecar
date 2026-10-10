@@ -1,5 +1,5 @@
 import {HttpError, text} from './core.js';
-import {outputText} from './access.js';
+import {outputText,responseBudget} from './access.js';
 
 const string = maxLength => ({type:'string',minLength:1,maxLength});
 export const templateSchema = {
@@ -50,7 +50,7 @@ export async function generateTemplate(input,key,model,fetcher=fetch) {
   try {
     const result=await fetcher('https://api.openai.com/v1/responses',{
       method:'POST',signal:AbortSignal.timeout(55000),headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
-      body:JSON.stringify({model,store:false,max_output_tokens:4500,instructions:templatePrompt,input:JSON.stringify(input),text:{format:{type:'json_schema',name:'activity_template',strict:true,schema:templateSchema}}})
+      body:JSON.stringify({model,store:false,...responseBudget(model,4500),instructions:templatePrompt,input:JSON.stringify(input),text:{format:{type:'json_schema',name:'activity_template',strict:true,schema:templateSchema}}})
     });
     if(!result.ok)throw new HttpError(502,result.status===401?'OpenAI rejected the saved API key. Ask the owner to check AI settings.':result.status===429?'OpenAI quota or rate limit reached. Try again later or ask the owner to check billing.':'AI could not build the template. Your description is still here; please retry.');
     const response=await result.json();

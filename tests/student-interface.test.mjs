@@ -11,6 +11,12 @@ test('student workspace renders only group editing and never instructor controls
   await import('../public/app.js?student-test');await new Promise(r=>setImmediate(r));globalThis.setInterval=originalInterval;
   assert.equal(document.querySelectorAll('.thumb').length,1);
   assert(document.querySelector('[contenteditable="true"]'));
+  const originalResponse=document.querySelector('[contenteditable="true"]');
+  assert(document.querySelector('#slide-tools').hasAttribute('hidden'));
+  document.querySelector('[data-action="student-tools"]').dispatchEvent(new window.Event('click',{bubbles:true}));
+  assert(!document.querySelector('#slide-tools').hasAttribute('hidden'));
+  assert.equal(document.querySelector('[data-action="student-tools"]').getAttribute('aria-expanded'),'true');
+  assert.equal(document.querySelector('[contenteditable="true"]'),originalResponse,'Opening tools must not replace a student’s active response');
   for(const selector of ['#right','[data-action="generate"]','[data-action="debrief-settings"]','[data-action="share"]','[data-action="timer"]','[data-action="export"]'])assert.equal(document.querySelector(selector),null,selector+' must not be available to students');
   assert(!document.body.textContent.includes('Your facilitation notes'));
 });
