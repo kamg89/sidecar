@@ -1,0 +1,4 @@
+project_id = "quick-webapp"
+[functions.classroom]
+# Every request is authenticated in the function with an instructor or group capability.
+verify_jwt = false
