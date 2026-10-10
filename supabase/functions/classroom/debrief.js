@@ -4,12 +4,17 @@ export const debriefSchema = {type:'object',additionalProperties:false,required:
   title:str(100),takeaway:str(220),bullets:{type:'array',minItems:1,maxItems:3,items:str(160)},question:str(180),notes:str(1000),sources:{type:'array',items:str(36)},
   examples:{type:'array',maxItems:2,items:{type:'object',additionalProperties:false,required:['kind','text','block_id'],properties:{kind:{type:'string',enum:['quote','summary']},text:str(160),block_id:str(36)}}}
 }}}}};
-export function schemaForCount(count) {
+export function schemaForCount(count,input) {
   const schema=structuredClone(debriefSchema);
   schema.properties.slides.minItems=count;
   schema.properties.slides.maxItems=count;
+  if(input){const blocks=input.flatMap(s=>s.blocks.filter(b=>b.text.trim()).map(b=>b.block_id));const slides=input.filter(s=>s.blocks.some(b=>b.text.trim())).map(s=>s.slide_id);if(blocks.length+slides.length<=500){schema.properties.slides.items.properties.examples.items.properties.block_id.enum=blocks;schema.properties.slides.items.properties.sources.items.enum=slides;}}
   return schema;
 }
+// Short request-local references prevent model transcription mistakes in UUIDs.
+// Restore database identifiers before the existing strict attribution validator.
+export function prepareEvidence(input){const blocks=new Map(),slides=new Map();let next=0;const modelInput=input.map((slide,i)=>{const sid='s'+(i+1);slides.set(sid,slide.slide_id);return {...slide,slide_id:sid,blocks:slide.blocks.map(block=>{const bid='b'+(++next);blocks.set(bid,block.block_id);return {...block,block_id:bid};})};});return{input:modelInput,blocks,slides};}
+export function restoreEvidence(data,evidence){for(const slide of data.slides||[]){if(Array.isArray(slide.sources))slide.sources=slide.sources.map(id=>evidence.slides.get(id)||id);if(Array.isArray(slide.examples))for(const example of slide.examples)example.block_id=evidence.blocks.get(example.block_id)||example.block_id;}return data;}
 export function debriefPrompt(session) {
   return `You are an experienced instructor synthesizing live group work into exactly ${session.slide_count} slides that can be projected directly to the class.
 WORKING ARRANGEMENT: ${session.work_mode==='individual'?'Each workspace is an individual student reflection. Describe individual perspectives, not group consensus. Saved names are optional self-reported labels.':'Each workspace is a collaborating group. Describe the group’s written ideas without claiming every member agrees.'}
