@@ -46,3 +46,5 @@ export function validateDebrief(data, validSlides) {
   });
   return data;
 }
+
+export function studentCanWrite(session) { return ['draft','live'].includes(session.status); }

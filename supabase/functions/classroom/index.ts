@@ -1,5 +1,5 @@
 import {accountLogin, accountFor, assertAccountScope} from './accounts.js';
-import { HttpError, text, uuid, integer, hash, token, safeEqual, style, publicSession } from './core.js';
+import { HttpError, text, uuid, integer, hash, token, safeEqual, style, publicSession, studentCanWrite } from './core.js';
 import { schemaForCount, debriefPrompt, enrichDebrief, prepareEvidence, restoreEvidence } from './debrief.js';
 import { classCode, withNewClassCode, newInstructorCode, instructorCode, assertTestWorkspaceScope, modelId, apiKey, candidateModels, validateAIConnection, activityModel, responseBudget } from './access.js';
 import { readAudio, transcribeAudio } from './transcription.js';
@@ -55,7 +55,7 @@ async function authorizeSlide(id, group) {
   if (group && group.id !== slide.group_id) throw new HttpError(403, 'You can edit only your group’s slides.');
   if (group) {
     const s = await one('class_sessions', slide.session_id);
-    if (s.status !== 'live' || (s.ends_at && new Date(s.ends_at).getTime() < Date.now())) throw new HttpError(403, 'Group editing is paused. Your instructor can reopen the activity.');
+    if (!studentCanWrite(s)) throw new HttpError(403, 'Group editing is paused. Your instructor can reopen the activity.');
   }
   return slide;
 }
