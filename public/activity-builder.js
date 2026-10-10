@@ -1,0 +1,32 @@
+const escape = value => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const choices = (items,value) => items.map(x=>`<option ${x===value?'selected':''}>${escape(x)}</option>`).join('');
+
+export function activitySetupForm(values={},focusOptions=[]) {
+  const individual=values.workMode==='individual';
+  return `<div class="row spread"><div><span class="eyebrow">New activity · 1 of 2</span><h2 id="modal-title">Describe it. We’ll set up the slides.</h2></div><button class="quiet icon" data-action="close-modal" aria-label="Close">×</button></div>
+  <p>Tell AI what students should do and learn. It will build a slide template with focused prompts and space for their thinking. You’ll review it before creating the activity.</p>
+  <form id="create-form" class="template-builder"><fieldset>
+    <div class="field"><label for="project-description">Describe the project</label><textarea id="project-description" name="description" rows="5" minlength="20" maxlength="6000" required placeholder="For example: In groups, spend 10 minutes comparing how a soccer club creates value for fans and captures value through ticket sales. Use a real club, explain the difference, and propose one new idea. Create two slides.">${escape(values.description)}</textarea><p class="hint">Include the topic, learning goal, task, and any time or slide requirements.</p></div>
+    <div class="field"><label>Activity title <span class="muted">(optional — AI can name it)</span><input name="title" maxlength="160" value="${escape(values.title)}" placeholder="Let AI suggest a title"></label></div>
+    <div class="form-grid"><label>Working arrangement<select name="workMode" id="work-mode"><option value="group" ${!individual?'selected':''}>Groups · shared decks</option><option value="individual" ${individual?'selected':''}>Individual · separate decks</option></select></label><label><span id="workspace-count-label">${individual?'Number of individual places':'Number of groups'}</span><input name="groups" type="number" min="1" max="${individual?60:20}" value="${escape(values.groups||4)}" required></label></div>
+    <details class="template-options"><summary>Debrief preferences</summary><div class="field"><label>Debrief slides<input name="slideCount" type="number" min="1" max="6" value="${escape(values.slideCount||4)}" required></label><p class="hint">For your private synthesis. AI chooses the student template length from your description.</p></div><div class="field"><label>Debrief focus<select name="focus">${choices(focusOptions,values.focus||focusOptions[0])}</select></label></div><div class="field"><label>Your private debrief instructions <span class="muted">(optional)</span><textarea name="prompt" rows="3" maxlength="4000" placeholder="Leave blank for AI to suggest guidance based on the project.">${escape(values.prompt)}</textarea></label></div></details>
+    <div class="modal-footer"><button type="button" data-action="close-modal">Cancel</button><button class="primary" type="submit">Generate template →</button></div>
+  </fieldset><p class="template-status" role="status" aria-live="polite"></p><p class="error-text template-error" role="alert"></p></form>`;
+}
+
+export function templateReviewForm(template,settings,model) {
+  return `<div class="row spread"><div><span class="eyebrow">New activity · 2 of 2</span><h2 id="modal-title">Your template, ready to shape.</h2></div><button class="quiet icon" data-action="close-modal" aria-label="Close">×</button></div>
+  <p>AI created ${template.slides.length} slide${template.slides.length===1?'':'s'} for each ${settings.workMode==='individual'?'student':'group'}. Edit any wording below. Each of your ${escape(settings.groups)} ${settings.workMode==='individual'?'students':'groups'} will get its own copy with blank response boxes.</p>
+  <form id="template-review" class="template-builder"><fieldset>
+    <div class="field"><label>Activity title<input name="title" maxlength="160" required value="${escape(template.title)}"></label></div>
+    <div class="field"><label>Student instructions<textarea name="instructions" rows="4" maxlength="6000" required>${escape(template.instructions)}</textarea></label></div>
+    <div class="template-deck">${template.slides.map((slide,index)=>`<article class="template-slide" data-template-slide><span class="eyebrow">Student slide ${String(index+1).padStart(2,'0')}</span><label class="template-title-label">Slide title<input data-template-title maxlength="140" required value="${escape(slide.title)}"></label>${slide.prompts.map((prompt,i)=>`<div class="template-response"><label>Response prompt ${i+1}<textarea data-template-prompt rows="2" maxlength="160" required>${escape(prompt)}</textarea></label><div class="template-blank" aria-hidden="true">Students add their thinking here…</div></div>`).join('')}</article>`).join('')}</div>
+    <details class="template-options"><summary>Private debrief guidance</summary><p class="hint">Only the instructor sees this. It guides the live debrief when students begin writing.</p><label>Your direction<textarea name="prompt" rows="5" maxlength="4000" required>${escape(template.debrief_prompt)}</textarea></label></details>
+    <div class="template-review-actions"><button type="button" data-action="template-back">← Edit description</button><button type="button" data-action="template-regenerate">Regenerate</button><button class="primary" type="submit">Create activity →</button></div>
+  </fieldset><p class="template-status" role="status" aria-live="polite"></p><p class="error-text template-error" role="alert"></p></form><p class="hint">AI-generated using ${escape(model)}. Review the fit for your class. The activity opens as a draft.</p>`;
+}
+
+export function readTemplateReview(form) {
+  return {title:form.querySelector('[name="title"]').value,instructions:form.querySelector('[name="instructions"]').value,debrief_prompt:form.querySelector('[name="prompt"]').value,
+    slides:[...form.querySelectorAll('[data-template-slide]')].map(slide=>({title:slide.querySelector('[data-template-title]').value,prompts:[...slide.querySelectorAll('[data-template-prompt]')].map(p=>p.value)}))};
+}

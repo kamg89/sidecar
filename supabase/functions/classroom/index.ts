@@ -1,6 +1,7 @@
 import { HttpError, text, uuid, integer, hash, token, safeEqual, style, publicSession } from './core.js';
 import { schemaForCount, debriefPrompt, enrichDebrief, prepareEvidence, restoreEvidence } from './debrief.js';
 import { classCode, withNewClassCode, newInstructorCode, instructorCode, assertTestWorkspaceScope, modelId, apiKey, candidateModels, validateAIConnection } from './access.js';
+import { templateInput, generateTemplate, validateTemplate, templateRows } from './template.js';
 
 let privateConfig = {};
 let configReadAt = 0;
@@ -163,7 +164,7 @@ Deno.serve(async req => {
     }
     const instructor = master || sandbox || Boolean(tester);
     if(['tester_access','test_workspace_access','admin_status','admin_models','admin_save'].includes(body.action)&&!master)throw new HttpError(tester||sandbox?403:401,'This action requires the classroom owner.');
-    if(['list','create','delete_session'].includes(body.action)&&!master&&!sandbox)throw new HttpError(tester?403:401,'This action requires instructor workspace access.');
+    if(['list','create','generate_template','delete_session'].includes(body.action)&&!master&&!sandbox)throw new HttpError(tester?403:401,'This action requires instructor workspace access.');
     if(sandbox)await assertTestWorkspaceScope(body,one);
     if(body.action==='test_workspace_access'){const code=body.revoke?'':newInstructorCode(),expires=body.revoke?'':new Date(Date.now()+7*86400000).toISOString();await db('rpc/classroom_save_test_access','','POST',{p_code_hash:code?await hash(code):'',p_token:code?'w_'+token():'',p_expires:expires});await loadConfig(true);return reply(code?{code,expires_at:expires}:{revoked:true});}
     if(body.action==='admin_status'){await loadConfig(true);return reply({configured:Boolean(env('OPENAI_API_KEY')),model:env('OPENAI_MODEL')||'gpt-4.1-mini'});}
@@ -186,19 +187,35 @@ Deno.serve(async req => {
     if (instructorActions.has(body.action) && !instructor) throw new HttpError(401,'Enter your instructor access key.');
     const group = instructor ? null : await groupFor(key);
     if (body.action === 'list') return reply({sessions:await db('class_sessions','select=id,title,status,created_at,ends_at&order=created_at.desc&limit=60'+(sandbox?'&is_test=eq.true':''))});
+    if (body.action === 'generate_template') {
+      const input=templateInput(body);
+      // An authenticated workspace gets a separate 12-attempt hourly bucket.
+      // This fixed-purpose counter does not share the sign-in or student-join bucket.
+      if(!await db('rpc/classroom_instructor_login_limit','','POST',{p_bucket:await hash('template:'+key+':'+Math.floor(Date.now()/3600000))}))throw new HttpError(429,'This workspace has used its 12 template attempts for this hour. You can still edit a generated preview or try again next hour.');
+      await loadConfig(true);
+      return reply(await generateTemplate(input,env('OPENAI_API_KEY'),env('OPENAI_MODEL')||'gpt-4.1-mini'));
+    }
     if (body.action === 'create') {
       if(sandbox&&(await db('class_sessions','is_test=eq.true&select=id')).length>=10)throw new HttpError(400,'The test workspace holds up to 10 activities. Delete an old test activity first.');
       const mode=body.workMode==='individual'?'individual':'group';
       const count = integer(body.groups,1,mode==='individual'?60:20);
+      const template=body.template===undefined?null:validateTemplate(body.template);
       const sessionId = crypto.randomUUID();
-      await withNewClassCode(code=>db('class_sessions','', 'POST', {id:sessionId,work_mode:mode,class_code:code,is_test:sandbox||Boolean(body.testMode),...(sandbox?{tester_expires_at:env('TEST_INSTRUCTOR_EXPIRES_AT')}:{}),title:text(body.title,160).trim() || 'Untitled activity',instructions:text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)}));
+      await withNewClassCode(code=>db('class_sessions','', 'POST', {id:sessionId,work_mode:mode,class_code:code,is_test:sandbox||Boolean(body.testMode),...(sandbox?{tester_expires_at:env('TEST_INSTRUCTOR_EXPIRES_AT')}:{}),title:template?.title||text(body.title,160).trim() || 'Untitled activity',instructions:template?.instructions??text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:template?.debrief_prompt??text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)}));
       try {
         const groups = await Promise.all(Array.from({length:count},async(_,i)=>{const join = token();return {id:crypto.randomUUID(),session_id:sessionId,name:`${mode==='individual'?'Learner':'Group'} ${i+1}`,join_token:join,token_hash:await hash(join),position:i};}));
         await db('class_groups','', 'POST',groups);
-        const slides = groups.map(g=>({id:crypto.randomUUID(),session_id:sessionId,group_id:g.id,title:g.name+' · Our reflection'}));
-        await db('class_slides','', 'POST',slides);
-        const labels = Array.isArray(body.labels) && body.labels.length===3 ? body.labels.map(l=>text(l,160)) : ['What helped us learn?','Where did AI take over the thinking?','One change we would make'];
-        await db('slide_blocks','', 'POST',slides.flatMap(s=>labels.map((label,i)=>({slide_id:s.id,label,position:i}))));
+        if(template) {
+          const rows=templateRows(template,groups,sessionId);
+          await db('class_slides','','POST',rows.slides);
+          await db('slide_blocks','','POST',rows.blocks);
+        } else {
+          // Keep existing open browser tabs compatible during deployment.
+          const slides = groups.map(g=>({id:crypto.randomUUID(),session_id:sessionId,group_id:g.id,title:g.name+' · Our reflection'}));
+          await db('class_slides','', 'POST',slides);
+          const labels = Array.isArray(body.labels) && body.labels.length===3 ? body.labels.map(l=>text(l,160)) : ['What helped us learn?','Where did AI take over the thinking?','One change we would make'];
+          await db('slide_blocks','', 'POST',slides.flatMap(s=>labels.map((label,i)=>({slide_id:s.id,label,position:i}))));
+        }
       } catch(e) { await db('class_sessions',`id=eq.${sessionId}`,'DELETE'); throw e; }
       return reply(await sessionData(sessionId));
     }
