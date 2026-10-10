@@ -2,11 +2,12 @@ import { config } from './config.js';
 import { makeDemo } from './demo.js';
 import { renderDebriefSlide, exampleCards } from './debrief-view.js';
 import { adminForm, joinForm, classInvitation, displayCode } from './admin-join.js';
+import { joinLink, joinPresentation } from './join-presentation.js';
 
 const $ = (s, root=document) => root.querySelector(s);
 const e = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fragment = new URLSearchParams(location.hash.slice(1));
-const state = {key:fragment.get('group') || fragment.get('test') || sessionStorage.getItem('sidecar-instructor') || localStorage.getItem('sidecar-instructor') || '',student:fragment.has('group'),tester:fragment.has('test'),second:fragment.get('view')==='debrief',sessionId:fragment.get('session'),data:null,selected:null,debriefIndex:0,demo:fragment.has('demo'),focusBlock:null,saving:new Set(),drafts:new Map(),conflicts:new Map(),polling:false,viewEpoch:0,aiBusy:false,lastAuto:0,present:null,projection:null};
+const state = {key:fragment.get('group') || fragment.get('test') || sessionStorage.getItem('sidecar-instructor') || localStorage.getItem('sidecar-instructor') || '',student:fragment.has('group'),tester:fragment.has('test'),second:fragment.get('view')==='debrief',sessionId:fragment.get('session'),data:null,selected:null,debriefIndex:0,demo:fragment.has('demo'),focusBlock:null,saving:new Set(),drafts:new Map(),conflicts:new Map(),polling:false,viewEpoch:0,aiBusy:false,lastAuto:0,present:null,projection:null,joinProjection:null};
 let toastTimer, modalReturnFocus;
 function toast(message) {const t=$('#toast');t.textContent=message;t.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('visible'),6500);}
 function icon(name){const paths={lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4"/>',share:'<path d="M12 16V3m-5 5 5-5 5 5M5 13v7h14v-7"/>',screen:'<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',spark:'<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',play:'<path d="m8 4 12 8-12 8Z"/>',check:'<path d="m5 12 4 4L19 6"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',arrow:'<path d="M4 12h16m-6-6 6 6-6 6"/>'};return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]||''}</svg>`;}
@@ -60,6 +61,7 @@ async function refresh(full=false) {
       if($('#editor-status'))$('#editor-status').textContent=saveStatus();
       updateClock();updateStudentState();
       if(state.projection)updateProjectionNotice();
+      if(state.joinProjection)paintJoinPresentation();
     }
   }catch(error){if(request.epoch!==state.viewEpoch||state.polling!==request)return;if(full){showLogin(error.message);}else{const status=$('#editor-status');if(status)status.textContent='Connection interrupted · retrying';}}finally{if(state.polling===request)state.polling=false;}
 }
@@ -105,11 +107,11 @@ document.addEventListener('change',async event=>{try{if(event.target.id==='work-
 document.addEventListener('submit',async event=>{
   event.preventDefault();const form=event.target;const values=Object.fromEntries(new FormData(form));const button=$('button[type=submit]',form);if(button)button.disabled=true;
   try {
-    if(form.id==='lookup-class'){const result=await api('lookup_class',{code:values.code});state.joinInfo=result;state.joinCode=values.code;showJoin(values.code,result);}
+    if(form.id==='lookup-class')await lookupClass(values.code);
     if(form.id==='join-class'){
-      const code=values.code.replace(/[\s-]/g,'').toUpperCase();const storageKey='sidecar-return-'+code;
-      let resumeToken=localStorage.getItem(storageKey);if(!/^[a-f0-9]{64}$/.test(resumeToken||'')){resumeToken=[...crypto.getRandomValues(new Uint8Array(32))].map(x=>x.toString(16).padStart(2,'0')).join('');localStorage.setItem(storageKey,resumeToken);}
-      const result=await api('join_class',{...values,resumeToken});state.key=result.token;state.student=true;state.tester=false;state.demo=false;state.second=false;state.sessionId=null;state.selected=null;state.drafts.clear();state.conflicts.clear();history.replaceState(null,'',location.pathname+'#group='+result.token);await refresh(true);
+      const code=values.code.replace(/[\s-]/g,'').toUpperCase();const storageKey='sidecar-return-'+(state.joinInfo?.id||code);
+      let resumeToken=localStorage.getItem(storageKey)||localStorage.getItem('sidecar-return-'+code);if(!/^[a-f0-9]{64}$/.test(resumeToken||'')){resumeToken=[...crypto.getRandomValues(new Uint8Array(32))].map(x=>x.toString(16).padStart(2,'0')).join('');localStorage.setItem(storageKey,resumeToken);}
+      localStorage.setItem(storageKey,resumeToken);const result=await api('join_class',{...values,resumeToken});state.key=result.token;state.student=true;state.tester=false;state.demo=false;state.second=false;state.sessionId=null;state.selected=null;state.drafts.clear();state.conflicts.clear();history.replaceState(null,'',location.pathname+'#group='+result.token);await refresh(true);
     }
     if(form.id==='admin-form'){
       $('#admin-error').textContent='';$('#admin-message').textContent='Testing the connection and saving securely…';
@@ -120,7 +122,7 @@ document.addEventListener('submit',async event=>{
     if(form.id==='debrief-settings'){await api('settings',{sessionId:state.sessionId,focus:values.focus,prompt:values.prompt,slideCount:Number(values.slideCount)});closeModal();await refresh();toast('Debrief direction saved.');}
     if(form.id==='start-form'){await api('settings',{sessionId:state.sessionId,status:'live',minutes:Number(values.minutes)});closeModal();await refresh(true);toast('Group editing is open. Your debrief will update during the activity.');}
     if(form.id==='activity-settings'){await api('settings',{sessionId:state.sessionId,title:values.title,instructions:values.instructions});closeModal();await refresh(true);}
-  }catch(error){if(form.id==='login')$('#login-error').textContent=error.message;else if(form.id==='admin-form'&&$('#admin-error'))$('#admin-error').textContent=error.message;else if(['lookup-class','join-class'].includes(form.id))$('#join-error').textContent=error.message;else toast(error.message);}finally{if(button)button.disabled=false;}
+  }catch(error){if(form.id==='login')$('#login-error').textContent=error.message;else if(form.id==='admin-form'&&$('#admin-error'))$('#admin-error').textContent=error.message;else if(['lookup-class','join-class'].includes(form.id)&&$('#join-error'))$('#join-error').textContent=error.message;else toast(error.message);}finally{if(button)button.disabled=false;}
 });
 
 document.addEventListener('click',async event=>{
@@ -132,7 +134,11 @@ document.addEventListener('click',async event=>{
     if(action==='join'||action==='join-back'){showJoin();}
     if(action==='copy-return'){await copyText(location.href,'Your private return link');}
     if(action==='leave-class'){await flushAll();state.data=null;state.student=false;state.key='';state.sessionId=null;state.selected=null;showJoin();}
-    if(action==='copy-class'){await copyText('Join '+state.data.session.title+'\n'+location.origin+location.pathname+'#join'+'\nClass code: '+displayCode(state.data.session.class_code),'Class invitation');}
+    if(action==='copy-class'){await copyText('Join '+state.data.session.title+'\n'+joinLink(state.data.session.class_code)+'\nClass code: '+displayCode(state.data.session.class_code),'Class invitation');}
+    if(action==='present-join'){await flushAll();openJoinPresentation();}
+    if(action==='join-project-close')closeJoinPresentation();
+    if(action==='join-project-fullscreen'){const node=$('.join-presentation');if(node?.requestFullscreen)await node.requestFullscreen();else toast('Use your browser’s full-screen command.');}
+    if(action==='join-project-copy'){const value=joinLink(state.data.session.class_code);try{await navigator.clipboard.writeText(value);toast('Student join link copied.');}catch{const input=$('#join-project-link');input.hidden=false;input.value=value;input.focus();input.select();toast('Copy the selected student link.');}}
     if(action==='toggle-join'){await api('join_settings',{sessionId:state.sessionId,enabled:!state.data.session.join_enabled});await refresh();share();}
     if(action==='rotate-class'){if(!confirm('Replace the class code? Existing deck links will still work.'))return;await api('join_settings',{sessionId:state.sessionId,rotate:true});await refresh();share();}
     if(action==='demo'){state.demo=true;state.student=false;state.tester=false;state.data=makeDemo();state.sessionId='demo';state.selected=state.data.slides[0].id;setUrl();renderWorkspace();}
@@ -180,22 +186,24 @@ document.addEventListener('click',async event=>{
     if(action==='close-present'){$('.present-view')?.remove();state.present=null;}
     if(action==='present-next'){state.present=(state.present+1)%state.data.slides.length;renderPresentation();}
     if(action==='present-prev'){state.present=(state.present-1+state.data.slides.length)%state.data.slides.length;renderPresentation();}
-    if(action==='export'){await flushAll();const d=structuredClone(state.data);delete d.session.class_code;d.groups=d.groups.map(({join_token,token_hash,...g})=>g);download(JSON.stringify(d,null,2),'sidecar-activity.json','application/json');toast('Activity and private debrief exported. Keep this file for yourself.');}
+    if(action==='export'){await flushAll();const d=structuredClone(state.data);delete d.session.class_code;delete d.session.legacy_class_code;d.groups=d.groups.map(({join_token,token_hash,...g})=>g);download(JSON.stringify(d,null,2),'sidecar-activity.json','application/json');toast('Activity and private debrief exported. Keep this file for yourself.');}
   }catch(error){toast(error.message);}
 });
 function download(content,name,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([content],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
 function renderPresentation(){$('.present-view')?.remove();const div=document.createElement('div');div.className='present-view';div.innerHTML=slideHtml(state.data.slides[state.present],true)+`<button class="present-close" data-action="close-present">Close presentation ×</button><div class="present-controls"><button data-action="present-prev">←</button><span>${state.present+1} / ${state.data.slides.length}</span><button data-action="present-next">→</button></div>`;document.body.append(div);}
 document.addEventListener('keydown',event=>{
+  if(state.joinProjection){if(event.key==='Escape'){closeJoinPresentation();return;}if(event.key==='Tab'){const nodes=[...$('.join-presentation').querySelectorAll('a,button,input:not([hidden])')];if(event.shiftKey&&document.activeElement===nodes[0]){event.preventDefault();nodes.at(-1)?.focus();}else if(!event.shiftKey&&document.activeElement===nodes.at(-1)){event.preventDefault();nodes[0]?.focus();}}return;}
   if(event.key==='Escape'&&state.projection){closeProjection();return;}
   if(state.projection&&!event.target.matches('input,textarea')){if(['ArrowRight','ArrowLeft',' '].includes(event.key)){event.preventDefault();moveProjection(event.key==='ArrowLeft'?-1:1);}return;}
   if(event.key==='Escape'){if($('.present-view')){$('.present-view').remove();state.present=null;}else closeModal();}
   if(state.present!==null&&!event.target.matches('input,textarea')){if(event.key==='ArrowRight'){state.present=(state.present+1)%state.data.slides.length;renderPresentation();}if(event.key==='ArrowLeft'){state.present=(state.present-1+state.data.slides.length)%state.data.slides.length;renderPresentation();}}
   if(event.key==='Tab'&&$('.modal')){const nodes=[...$('.modal').querySelectorAll('button,input,select,textarea,a[href]')].filter(x=>!x.disabled);if(event.shiftKey&&document.activeElement===nodes[0]){event.preventDefault();nodes.at(-1)?.focus();}else if(!event.shiftKey&&document.activeElement===nodes.at(-1)){event.preventDefault();nodes[0]?.focus();}}
 });
+addEventListener('hashchange',async()=>{const target=location.hash,params=new URLSearchParams(target.slice(1));if(!params.has('join'))return;try{if(state.data)await flushAll();if(location.hash!==target)return;if(state.joinProjection)closeJoinPresentation();if(state.projection)closeProjection();closeModal();$('.present-view')?.remove();state.present=null;const code=params.get('code')||'';showJoin(code);if(code)await lookupClass(code);}catch(error){if(state.student)history.replaceState(null,'',location.pathname+'#group='+state.key);else setUrl();toast(error.message);}});
 addEventListener('beforeunload',event=>{if(state.drafts.size||state.saving.size){event.preventDefault();event.returnValue='';}});
 setInterval(()=>{updateClock();updateStudentState();if($('#debrief-live-line'))$('#debrief-live-line').textContent=debriefStatus();if(state.data&&!state.demo&&!state.polling)refresh();},3000);
 setInterval(()=>{if(!state.data||state.student||state.demo||config.schedulerEnabled)return;const s=state.data.session;if(s.status==='live'&&s.auto_debrief&&new Date(s.ends_at)>new Date()&&Date.now()-state.lastAuto>=60000){state.lastAuto=Date.now();generate(false);}},5000);
-if(fragment.has('join')){showJoin();}else if(state.demo){state.data=makeDemo();state.sessionId='demo';state.selected=state.data.slides[0].id;renderWorkspace();}else if(state.student||state.tester)refresh(true);else if(state.key&&state.sessionId)openSession(state.sessionId);else if(state.key)dashboard();else showLogin();
+if(fragment.has('join')){const code=fragment.get('code')||'';showJoin(code);if(code)lookupClass(code);}else if(state.demo){state.data=makeDemo();state.sessionId='demo';state.selected=state.data.slides[0].id;renderWorkspace();}else if(state.student||state.tester)refresh(true);else if(state.key&&state.sessionId)openSession(state.sessionId);else if(state.key)dashboard();else showLogin();
 
 function debriefStatus(){
   const s=state.data?.session;if(!s)return '';
@@ -223,7 +231,11 @@ addEventListener('resize',sizeProjection);
 
 document.addEventListener('fullscreenchange',sizeProjection);
 
-function showJoin(code='',classroom=null){state.viewEpoch++;state.data=null;state.demo=false;state.student=false;state.tester=false;state.key='';state.sessionId=null;history.replaceState(null,'',location.pathname+'#join');$('#app').innerHTML=joinForm(code,classroom);$('#class-code')?.focus();}
+function showJoin(code='',classroom=null){state.viewEpoch++;state.data=null;state.demo=false;state.student=false;state.tester=false;state.second=false;state.key='';state.sessionId=null;state.joinInfo=classroom;state.joinCode=code;history.replaceState(null,'',location.pathname+'#join'+(code?'&code='+encodeURIComponent(code.replace(/[\s-]/g,'').toUpperCase()):''));$('#app').className='';$('#app').innerHTML=joinForm(code,classroom);if(!code&&globalThis.innerWidth>600)$('#class-code')?.focus();}
+async function lookupClass(code){const epoch=state.viewEpoch,button=$('#lookup-class button[type=submit]');if(button){button.disabled=true;button.textContent='Finding your class…';}try{const result=await api('lookup_class',{code});if(epoch===state.viewEpoch)showJoin(code,result);}catch(error){if(epoch===state.viewEpoch&&$('#join-error'))$('#join-error').textContent=error.message;}finally{if(button){button.disabled=false;button.textContent='Find class →';}}}
+function openJoinPresentation(){if(state.student||state.demo||!state.data)return;closeModal();if(state.projection)closeProjection();const node=document.createElement('section');node.className='join-presentation';node.setAttribute('role','dialog');node.setAttribute('aria-modal','true');node.setAttribute('aria-labelledby','join-project-title');node.innerHTML='<div class="join-project-stage"></div><nav class="join-project-controls" aria-label="Join presentation controls"><input id="join-project-link" readonly hidden aria-label="Student join link"><button data-action="join-project-copy">Copy join link</button><button data-action="join-project-fullscreen">Full screen</button><button data-action="join-project-close">Back to instructor ×</button></nav>';document.body.append(node);state.joinProjection={signature:''};$('#app').inert=true;$('#modal-root').inert=true;document.body.classList.add('projecting');paintJoinPresentation();$('[data-action="join-project-close"]')?.focus();}
+function paintJoinPresentation(){if(!state.joinProjection)return;const s=state.data.session,signature=JSON.stringify([s.class_code,s.join_enabled,s.status,s.title,s.work_mode]);if(signature===state.joinProjection.signature)return;$('.join-project-stage').innerHTML=joinPresentation(s);state.joinProjection.signature=signature;}
+function closeJoinPresentation(){if(document.fullscreenElement&&document.exitFullscreen)document.exitFullscreen().catch(()=>{});$('.join-presentation')?.remove();state.joinProjection=null;$('#app').inert=false;$('#modal-root').inert=false;document.body.classList.remove('projecting');$('[data-action="share"]')?.focus();}
 async function loadModels(){const error=$('#admin-error'),message=$('#admin-message'),button=$('[data-action="load-models"]');if(!button)return;button.disabled=true;error.textContent='';message.textContent='Loading models available to this key…';try{const current=$('#admin-model').value;const result=await api('admin_models',{apiKey:$('#admin-api-key').value.trim()});if(!result.models.length)throw new Error('No compatible text models were found for this key.');$('#admin-model').innerHTML=result.models.map(id=>`<option value="${e(id)}" ${id===current?'selected':''}>${e(id)}</option>`).join('');message.textContent='Choose a model, then test and save. Your current settings have not changed.';}catch(err){error.textContent=err.message;message.textContent='';}finally{button.disabled=false;}}
 async function copyText(value,title){try{await navigator.clipboard.writeText(value);toast(title+' copied.');}catch{modal(`<h2 id="modal-title">${e(title)}</h2><p>Copy the text below.</p><textarea rows="4" readonly>${e(value)}</textarea><div class="modal-footer"><button data-action="close-modal">Done</button></div>`);}}
 function syncOtherBlocks(){for(const block of state.data.blocks.filter(b=>b.slide_id===state.selected)){const node=$(`[data-block="${block.id}"]`);if(node&&!node.contains(document.activeElement)&&!state.drafts.has(block.id)&&!state.conflicts.has(block.id))node.outerHTML=blockHtml(block,!editable());}}

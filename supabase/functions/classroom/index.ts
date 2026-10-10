@@ -1,6 +1,6 @@
 import { HttpError, text, uuid, integer, hash, token, safeEqual, style, publicSession } from './core.js';
 import { schemaForCount, debriefPrompt, enrichDebrief } from './debrief.js';
-import { classCode, newClassCode, modelId, apiKey, candidateModels, validateAIConnection } from './access.js';
+import { classCode, withNewClassCode, modelId, apiKey, candidateModels, validateAIConnection } from './access.js';
 
 let privateConfig = {};
 let configReadAt = 0;
@@ -14,7 +14,7 @@ async function db(table, query = '', method = 'GET', body = undefined) {
     method, headers: {apikey:serviceKey, Authorization:`Bearer ${serviceKey}`, 'Content-Type':'application/json', Prefer:'return=representation'},
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!response.ok) { console.error('Database operation failed', table, response.status); throw new HttpError(500, 'Could not save to the database. Please retry.'); }
+  if (!response.ok) { const detail=await response.json().catch(()=>({}));const error=new HttpError(500,'Could not save to the database. Please retry.');if(detail.code==='23505'&&detail.message?.includes('class_sessions_class_code_key'))error.code='CLASS_CODE_COLLISION';else console.error('Database operation failed',table,response.status);throw error; }
   return response.status === 204 ? [] : response.json();
 }
 async function loadConfig(force=false) {
@@ -28,7 +28,7 @@ async function sessionData(id, group = null) {
   const groups = group ? [{id:group.id, name:group.name, position:group.position}] : await db('class_groups', `session_id=eq.${id}&order=position`);
   const slides = await db('class_slides', `session_id=eq.${id}${group ? '&group_id=eq.' + group.id : ''}&order=position,created_at`);
   const blocks = slides.length ? await db('slide_blocks', `slide_id=in.(${slides.map(s=>s.id).join(',')})&order=position,id`) : [];
-  const {tester_key_hash, ...instructorSession} = session;
+  const {tester_key_hash, legacy_class_code, ...instructorSession} = session;
   return {session:group ? publicSession(session) : instructorSession, groups:groups.map(({token_hash,claimant_hash,...g})=>({...g,claimed:Boolean(claimant_hash)})), slides, blocks};
 }
 async function groupFor(auth) {
@@ -128,10 +128,10 @@ Deno.serve(async req => {
       const allowed=await db('rpc/classroom_join_limit','','POST',{p_bucket:await hash(ip+':'+Math.floor(Date.now()/60000))});
       if(!allowed)throw new HttpError(429,'Too many join attempts. Please wait one minute and retry.');
       const code=classCode(body.code);
-      const activity=(await db('class_sessions','class_code=eq.'+code))[0];
+      const activity=(await db('class_sessions',`or=(class_code.eq.${code},legacy_class_code.eq.${code})`))[0];
       if(!activity||!activity.join_enabled||activity.status==='ended'||activity.is_test&&(!activity.tester_expires_at||new Date(activity.tester_expires_at)<new Date()))throw new HttpError(404,'This class code is unavailable. Check the code with your instructor.');
       const groups=await db('class_groups',`session_id=eq.${activity.id}&order=position`);
-      if(body.action==='lookup_class')return reply({title:activity.title,mode:activity.work_mode,status:activity.status,groups:activity.work_mode==='group'?groups.map(g=>({id:g.id,name:g.name})):[],capacity:groups.length});
+      if(body.action==='lookup_class')return reply({id:activity.id,title:activity.title,mode:activity.work_mode,status:activity.status,groups:activity.work_mode==='group'?groups.map(g=>({id:g.id,name:g.name})):[],capacity:groups.length});
       if(activity.work_mode==='individual'){
         const name=text(body.name,60).trim();if(!name)throw new HttpError(400,'Enter the name you want displayed with your work.');
         if(!/^[a-f0-9]{64}$/.test(body.resumeToken||''))throw new HttpError(400,'Your browser could not create a return code. Please reload.');
@@ -174,7 +174,7 @@ Deno.serve(async req => {
       const mode=body.workMode==='individual'?'individual':'group';
       const count = integer(body.groups,1,mode==='individual'?60:20);
       const sessionId = crypto.randomUUID();
-      await db('class_sessions','', 'POST', {id:sessionId,work_mode:mode,class_code:newClassCode(),is_test:Boolean(body.testMode),title:text(body.title,160).trim() || 'Untitled activity',instructions:text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)});
+      await withNewClassCode(code=>db('class_sessions','', 'POST', {id:sessionId,work_mode:mode,class_code:code,is_test:Boolean(body.testMode),title:text(body.title,160).trim() || 'Untitled activity',instructions:text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)}));
       try {
         const groups = await Promise.all(Array.from({length:count},async(_,i)=>{const join = token();return {id:crypto.randomUUID(),session_id:sessionId,name:`${mode==='individual'?'Learner':'Group'} ${i+1}`,join_token:join,token_hash:await hash(join),position:i};}));
         await db('class_groups','', 'POST',groups);
@@ -195,8 +195,10 @@ Deno.serve(async req => {
       return reply(body.revoke?{revoked:true}:{token:invite,expires_at:expires});
     }
     if(body.action==='join_settings'){
-      const patch={};if('enabled' in body)patch.join_enabled=Boolean(body.enabled);if(body.rotate)patch.class_code=newClassCode();
-      await db('class_sessions',`id=eq.${uuid(body.sessionId)}`,'PATCH',patch);return reply({saved:true});
+      const patch={};if('enabled' in body)patch.join_enabled=Boolean(body.enabled);
+      const query=`id=eq.${uuid(body.sessionId)}`;
+      if(body.rotate)await withNewClassCode(code=>db('class_sessions',query,'PATCH',{...patch,class_code:code,legacy_class_code:null}));
+      else await db('class_sessions',query,'PATCH',patch);return reply({saved:true});
     }
     if (body.action === 'settings') {
       const patch = {};

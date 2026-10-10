@@ -1,6 +1,8 @@
 import {HttpError,text} from './core.js';
-export function classCode(value){const code=text(value,30).replace(/[\s-]/g,'').toUpperCase();if(!/^[A-F0-9]{12}$/.test(code))throw new HttpError(400,'Enter the 12-character class code your instructor shared.');return code;}
-export function newClassCode(){return [...crypto.getRandomValues(new Uint8Array(6))].map(x=>x.toString(16).padStart(2,'0')).join('').toUpperCase();}
+const CODE_ALPHABET='ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+export function classCode(value){const code=text(value,30).replace(/[\s-]/g,'').toUpperCase();if(!/^[A-HJKMNP-Z2-9]{6}$/.test(code)&&!/^[A-F0-9]{12}$/.test(code))throw new HttpError(400,'Enter the six-character class code your instructor shared. Older 12-character codes also work.');return code;}
+export function newClassCode(){let code='';while(code.length<6){for(const byte of crypto.getRandomValues(new Uint8Array(12))){if(byte<256-256%CODE_ALPHABET.length)code+=CODE_ALPHABET[byte%CODE_ALPHABET.length];if(code.length===6)break;}}return code;}
+export async function withNewClassCode(save,generate=newClassCode){for(let attempt=0;attempt<5;attempt++){try{return await save(generate());}catch(error){if(error.code!=='CLASS_CODE_COLLISION')throw error;}}throw new HttpError(503,'Could not assign a class code. Please retry.');}
 export function modelId(value){const model=text(value,100);if(!/^gpt-[A-Za-z0-9._-]+$/.test(model)||/audio|realtime|transcrib|tts|image|search|codex|research|chat-latest|instruct/.test(model))throw new HttpError(400,'Choose a text model for structured classroom debriefs.');return model;}
 export function apiKey(value){const key=text(value,512).trim();if(!/^sk-[A-Za-z0-9_-]{17,}$/.test(key))throw new HttpError(400,'Enter a valid OpenAI API key, or leave it blank to keep the saved key.');return key;}
 export function candidateModels(ids){return [...new Set(ids)].filter(id=>{try{modelId(id);return /^gpt-(?:4\.1|4o|5|6)(?:[-.]|$)/.test(id)&&!/-\d{4}-\d{2}-\d{2}$/.test(id);}catch{return false;}}).sort((a,b)=>a.localeCompare(b));}
