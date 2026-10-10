@@ -1,3 +1,4 @@
+import {accountLogin, accountFor, assertAccountScope} from './accounts.js';
 import { HttpError, text, uuid, integer, hash, token, safeEqual, style, publicSession } from './core.js';
 import { schemaForCount, debriefPrompt, enrichDebrief, prepareEvidence, restoreEvidence } from './debrief.js';
 import { classCode, withNewClassCode, newInstructorCode, instructorCode, assertTestWorkspaceScope, modelId, apiKey, candidateModels, validateAIConnection, activityModel, responseBudget } from './access.js';
@@ -30,7 +31,7 @@ async function sessionData(id, group = null) {
   const groups = group ? [{id:group.id, name:group.name, position:group.position}] : await db('class_groups', `session_id=eq.${id}&order=position`);
   const slides = await db('class_slides', `session_id=eq.${id}${group ? '&group_id=eq.' + group.id : ''}&order=position,created_at`);
   const blocks = slides.length ? await db('slide_blocks', `slide_id=in.(${slides.map(s=>s.id).join(',')})&order=position,id`) : [];
-  const {tester_key_hash, legacy_class_code, ...instructorSession} = session;
+  const {tester_key_hash, legacy_class_code, owner_user_id, ...instructorSession} = session;
   return {session:group ? publicSession(session) : instructorSession, groups:groups.map(({token_hash,claimant_hash,...g})=>({...g,claimed:Boolean(claimant_hash)})), slides, blocks};
 }
 async function groupFor(auth) {
@@ -132,6 +133,7 @@ Deno.serve(async req => {
       for (const s of sessions) { try { const result=await generate(s.id); results.push(result); if(result.skipped) await db('class_sessions',`id=eq.${s.id}`,'PATCH',{last_attempt_at:now}); } catch(e) {results.push({error:e.message});} }
       return reply({checked:sessions.length,results});
     }
+    if(['account_signup','account_signin'].includes(body.action))return reply(await accountLogin(body,{url:env('SUPABASE_URL'),serviceKey,db,ip:req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()||'unknown'}));
     if(body.action==='instructor_login'){
       const ip=req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()||'unknown';
       if(!await db('rpc/classroom_instructor_login_limit','','POST',{p_bucket:await hash('instructor:'+ip+':'+Math.floor(Date.now()/60000))}))throw new HttpError(429,'Too many sign-in attempts. Wait one minute and try again.');
@@ -169,10 +171,13 @@ Deno.serve(async req => {
       tester = (await db('class_sessions','tester_key_hash=eq.'+await hash(key)))[0];
       if(!tester?.is_test || !tester.tester_expires_at || new Date(tester.tester_expires_at)<new Date()) throw new HttpError(401,'This test invitation has expired or been revoked.');
     }
-    const instructor = master || sandbox || Boolean(tester);
+    const account=await accountFor(key,db);
+    const instructor = master || sandbox || Boolean(tester) || Boolean(account);
+    if(body.action==='account_logout'){if(!account)throw new HttpError(401,'Please sign in first.');await db('instructor_sessions','token_hash=eq.'+await hash(key),'DELETE');return reply({signed_out:true});}
     if(['tester_access','test_workspace_access','admin_status','admin_models','admin_save'].includes(body.action)&&!master)throw new HttpError(tester||sandbox?403:401,'This action requires the classroom owner.');
-    if(['list','create','generate_template','activity_models','transcribe_description','delete_session'].includes(body.action)&&!master&&!sandbox)throw new HttpError(tester?403:401,'This action requires instructor workspace access.');
+    if(['list','create','generate_template','activity_models','transcribe_description','delete_session'].includes(body.action)&&!master&&!sandbox&&!account)throw new HttpError(tester?403:401,'This action requires instructor workspace access.');
     if(sandbox)await assertTestWorkspaceScope(body,one);
+    if(account)await assertAccountScope(body,account,one);
     if(body.action==='test_workspace_access'){const code=body.revoke?'':newInstructorCode(),expires=body.revoke?'':new Date(Date.now()+7*86400000).toISOString();await db('rpc/classroom_save_test_access','','POST',{p_code_hash:code?await hash(code):'',p_token:code?'w_'+token():'',p_expires:expires});await loadConfig(true);return reply(code?{code,expires_at:expires}:{revoked:true});}
     if(body.action==='admin_status'){await loadConfig(true);return reply({configured:Boolean(env('OPENAI_API_KEY')),model:env('OPENAI_MODEL')||'gpt-4.1-mini'});}
     if(body.action==='admin_models'){
@@ -193,7 +198,7 @@ Deno.serve(async req => {
     const instructorActions = new Set(['list','create','settings','debrief','history','rotate_group','tester_access','delete_session','join_settings']);
     if (instructorActions.has(body.action) && !instructor) throw new HttpError(401,'Enter your instructor access key.');
     const group = instructor ? null : await groupFor(key);
-    if (body.action === 'list') return reply({sessions:await db('class_sessions','select=id,title,status,created_at,ends_at,work_mode,ai_model&order=created_at.desc&limit=60'+(sandbox?'&is_test=eq.true':''))});
+    if (body.action === 'list') return reply({sessions:await db('class_sessions','select=id,title,status,created_at,ends_at,work_mode,ai_model&order=created_at.desc&limit=60'+(account?'&owner_user_id=eq.'+account:'&owner_user_id=is.null'+(sandbox?'&is_test=eq.true':'')))});
     if (body.action === 'activity_models') {
       await loadConfig(true);
       if(!env('OPENAI_API_KEY'))throw new HttpError(503,'Ask the owner to connect an API key in AI settings.');
@@ -205,7 +210,7 @@ Deno.serve(async req => {
     if(body.action==='transcribe_description') {
       if(!audioRequest)throw new HttpError(400,'Send a microphone recording.');
       const file=await readAudio(req);
-      if(!await db('rpc/classroom_instructor_login_limit','','POST',{p_bucket:await hash('transcription:'+key+':'+Math.floor(Date.now()/3600000))}))throw new HttpError(429,'This workspace has used its 12 voice-input attempts for this hour. You can still type your description.');
+      if(!await db('rpc/classroom_instructor_login_limit','','POST',{p_bucket:await hash('transcription:'+(account||key)+':'+Math.floor(Date.now()/3600000))}))throw new HttpError(429,'This workspace has used its 12 voice-input attempts for this hour. You can still type your description.');
       await loadConfig(true);
       return reply(await transcribeAudio(file,env('OPENAI_API_KEY')));
     }
@@ -214,18 +219,19 @@ Deno.serve(async req => {
       const model=activityModel(body.model,env('OPENAI_MODEL')||'gpt-4.1-mini');
       // An authenticated workspace gets a separate 12-attempt hourly bucket.
       // This fixed-purpose counter does not share the sign-in or student-join bucket.
-      if(!await db('rpc/classroom_instructor_login_limit','','POST',{p_bucket:await hash('template:'+key+':'+Math.floor(Date.now()/3600000))}))throw new HttpError(429,'This workspace has used its 12 template attempts for this hour. You can still edit a generated preview or try again next hour.');
+      if(!await db('rpc/classroom_instructor_login_limit','','POST',{p_bucket:await hash('template:'+(account||key)+':'+Math.floor(Date.now()/3600000))}))throw new HttpError(429,'This workspace has used its 12 template attempts for this hour. You can still edit a generated preview or try again next hour.');
       await loadConfig(true);
       return reply(await generateTemplate(input,env('OPENAI_API_KEY'),model));
     }
     if (body.action === 'create') {
       if(sandbox&&(await db('class_sessions','is_test=eq.true&select=id')).length>=10)throw new HttpError(400,'The test workspace holds up to 10 activities. Delete an old test activity first.');
+      if(account&&(await db('class_sessions','owner_user_id=eq.'+account+'&select=id&limit=20')).length>=20)throw new HttpError(400,'Your workspace holds up to 20 activities. Delete an old activity first.');
       const mode=body.workMode==='individual'?'individual':'group';
       const count = integer(body.groups,1,mode==='individual'?60:20);
       const template=body.template===undefined?null:validateTemplate(body.template);
       const model=activityModel(body.model,env('OPENAI_MODEL')||'gpt-4.1-mini');
       const sessionId = crypto.randomUUID();
-      await withNewClassCode(code=>db('class_sessions','', 'POST', {id:sessionId,ai_model:model,work_mode:mode,class_code:code,is_test:sandbox||Boolean(body.testMode),...(sandbox?{tester_expires_at:env('TEST_INSTRUCTOR_EXPIRES_AT')}:{}),title:template?.title||text(body.title,160).trim() || 'Untitled activity',instructions:template?.instructions??text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:template?.debrief_prompt??text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)}));
+      await withNewClassCode(code=>db('class_sessions','', 'POST', {id:sessionId,owner_user_id:account||null,ai_model:model,work_mode:mode,class_code:code,is_test:sandbox||(master&&Boolean(body.testMode)),...(sandbox?{tester_expires_at:env('TEST_INSTRUCTOR_EXPIRES_AT')}:{}),title:template?.title||text(body.title,160).trim() || 'Untitled activity',instructions:template?.instructions??text(body.instructions,6000),focus:text(body.focus,300),debrief_prompt:template?.debrief_prompt??text(body.prompt,4000),slide_count:integer(body.slideCount,1,6)}));
       try {
         const groups = await Promise.all(Array.from({length:count},async(_,i)=>{const join = token();return {id:crypto.randomUUID(),session_id:sessionId,name:`${mode==='individual'?'Learner':'Group'} ${i+1}`,join_token:join,token_hash:await hash(join),position:i};}));
         await db('class_groups','', 'POST',groups);
